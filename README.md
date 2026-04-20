@@ -139,3 +139,4 @@ All notebooks and the R script include lightweight repository-root bootstrapping
 - `run_som_u850_olr.R` now reads the processed NetCDF inputs directly with `terra` and `ncdf4`, then writes both NetCDF and flattened CSV versions of the SOM codebook/composite products.
 - `scripts/export_som_u850_olr_inputs.py` is kept as a legacy fallback utility but is no longer required in the normal `ocpc` workflow.
 - Existing analysis products under `outputs/som_u850/` and `outputs/som_u850_olr/` are treated as working artifacts, not source files.
+# EASM
