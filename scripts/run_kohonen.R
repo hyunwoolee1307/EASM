@@ -1,0 +1,428 @@
+# =========================================================
+# SOM analysis for daily JJA 850 hPa uwnd
+# Period : 1991-2023
+# Domain : 0-60N, 100-180E
+# Method : 3x3 SOM using kohonen
+# Features:
+#   - JJA anomaly
+#   - area weighting
+#   - node composite maps
+#   - annual occurrence frequency
+#   - 10-year running mean
+# =========================================================
+
+# ----------------------------
+# 0. packages
+# ----------------------------
+library(terra)
+library(kohonen)
+
+# ----------------------------
+# 0.5 path bootstrap
+# ----------------------------
+find_repo_root <- function(start) {
+  current <- normalizePath(start, winslash = "/", mustWork = TRUE)
+
+  repeat {
+    has_repo_shape <- dir.exists(file.path(current, "scripts")) &&
+      dir.exists(file.path(current, "notebooks")) &&
+      dir.exists(file.path(current, "data"))
+
+    if (has_repo_shape) {
+      return(current)
+    }
+
+    parent <- dirname(current)
+    if (identical(parent, current)) {
+      break
+    }
+    current <- parent
+  }
+
+  stop("Could not locate the repository root from the current execution context.")
+}
+
+get_script_dir <- function() {
+  args <- commandArgs(trailingOnly = FALSE)
+  file_arg <- "--file="
+  matches <- grep(file_arg, args, value = TRUE)
+
+  if (length(matches) > 0) {
+    script_path <- sub(file_arg, "", matches[1])
+    return(dirname(normalizePath(script_path, winslash = "/", mustWork = TRUE)))
+  }
+
+  frame_files <- vapply(sys.frames(), function(env) {
+    if (exists("ofile", envir = env, inherits = FALSE)) {
+      get("ofile", envir = env, inherits = FALSE)
+    } else {
+      NA_character_
+    }
+  }, character(1))
+
+  frame_files <- frame_files[!is.na(frame_files)]
+  if (length(frame_files) > 0) {
+    return(dirname(normalizePath(frame_files[1], winslash = "/", mustWork = TRUE)))
+  }
+
+  normalizePath(getwd(), winslash = "/", mustWork = TRUE)
+}
+
+# ----------------------------
+# 1. user settings
+# ----------------------------
+repo_root <- find_repo_root(get_script_dir())
+processed_dir <- file.path(repo_root, "data", "processed")
+outdir <- file.path(repo_root, "outputs", "som_u850")
+
+infile <- file.path(processed_dir, "uwnd_z850_jja_1991_2023.nc")
+varname <- "uwnd"   # if needed for checking only
+
+if (!dir.exists(outdir)) dir.create(outdir, recursive = TRUE)
+
+set.seed(123)
+
+# SOM settings
+xdim <- 3
+ydim <- 3
+rlen <- 200
+alpha_vals <- c(0.05, 0.01)
+
+# ----------------------------
+# 2. read data
+# ----------------------------
+r <- rast(infile)
+
+# If the file contains multiple variables or levels, this simple version
+# assumes the selected raster already corresponds to daily 850hPa uwnd.
+# If not, the file structure must be adjusted upstream.
+
+# ----------------------------
+# 3. crop domain
+#    domain: 100E-180E, 0-60N
+# ----------------------------
+r <- crop(r, ext(100, 180, 0, 60))
+
+# ----------------------------
+# 4. select JJA 1991-2023
+# ----------------------------
+tt <- as.Date(time(r))
+yy <- as.integer(format(tt, "%Y"))
+mm <- as.integer(format(tt, "%m"))
+dd <- as.integer(format(tt, "%d"))
+
+idx <- which(yy >= 1991 & yy <= 2023 & mm %in% c(6, 7, 8))
+
+r_jja <- r[[idx]]
+t_jja <- tt[idx]
+y_jja <- yy[idx]
+m_jja <- mm[idx]
+d_jja <- dd[idx]
+
+cat("Selected daily samples:", nlyr(r_jja), "\n")
+
+# ----------------------------
+# 5. make JJA monthly anomaly
+#    anomaly = daily value - monthly climatology
+#    climatology based on all JJA days in 1991-2023 for each month separately
+# ----------------------------
+# month-specific climatology (June, July, August)
+clim_list <- vector("list", 3)
+names(clim_list) <- c("6", "7", "8")
+
+for (mon in c(6, 7, 8)) {
+  ii <- which(m_jja == mon)
+  clim_list[[as.character(mon)]] <- mean(r_jja[[ii]], na.rm = TRUE)
+}
+
+# anomaly raster stack
+anom_layers <- vector("list", length = nlyr(r_jja))
+
+for (i in seq_len(nlyr(r_jja))) {
+  mon_i <- m_jja[i]
+  anom_layers[[i]] <- r_jja[[i]] - clim_list[[as.character(mon_i)]]
+}
+
+r_anom <- rast(anom_layers)
+time(r_anom) <- t_jja
+
+# ----------------------------
+# 6. area weighting
+#    weight = sqrt(cos(lat))
+#    often used so that Euclidean distance in SOM is less dominated by
+#    high-latitude grid density
+# ----------------------------
+lat_rast <- init(r_anom[[1]], "y")
+w_rast <- sqrt(cos(pi * lat_rast / 180))
+
+# apply weights to each day
+r_weighted <- r_anom * w_rast
+
+# ----------------------------
+# 7. make SOM input matrix
+#    rows = time samples
+#    cols = grid cells
+# ----------------------------
+# values() returns [ncell x nlyr]
+x0 <- values(r_weighted)
+dim(x0)
+
+# transpose -> [ntime x ncell]
+x <- t(x0)
+
+# remove samples with any missing values
+keep_row <- complete.cases(x)
+x <- x[keep_row, , drop = FALSE]
+
+t_use <- t_jja[keep_row]
+y_use <- y_jja[keep_row]
+m_use <- m_jja[keep_row]
+d_use <- d_jja[keep_row]
+
+# remove cells with any missing values
+keep_col <- colSums(is.na(x)) == 0
+x <- x[, keep_col, drop = FALSE]
+
+cat("Final SOM matrix dimension:", dim(x)[1], "samples x", dim(x)[2], "grid cells\n")
+
+# standardize each variable (grid point)
+x_scaled <- scale(x)
+
+# store scaling info
+x_center <- attr(x_scaled, "scaled:center")
+x_scale  <- attr(x_scaled, "scaled:scale")
+
+# ----------------------------
+# 8. train SOM
+# ----------------------------
+grid_3x3 <- kohonen::somgrid(xdim = xdim, ydim = ydim, topo = "rectangular")
+
+som_model <- kohonen::som(
+  X = x_scaled,
+  grid = grid_3x3,
+  rlen = rlen,
+  alpha = alpha_vals,
+  keep.data = TRUE
+)
+
+# ----------------------------
+# 9. basic diagnostics
+# ----------------------------
+png(file.path(outdir, "som_diagnostics.png"), width = 1700, height = 1350, res = 170)
+par(
+  mfrow = c(2, 2),
+  mar = c(5.2, 6.0, 3.4, 2.8),
+  mgp = c(2.8, 0.9, 0),
+  oma = c(0.4, 0.4, 0.4, 0.4),
+  xpd = NA
+)
+plot(som_model, type = "changes", main = "Training Changes")
+plot(som_model, type = "counts", main = "Counts")
+plot(som_model, type = "quality", main = "Quality")
+plot(som_model, type = "dist.neighbours", main = "Neighbour Distances")
+dev.off()
+
+# ----------------------------
+# 10. BMU assignment
+# ----------------------------
+bmu <- som_model$unit.classif
+
+assign_df <- data.frame(
+  date  = t_use,
+  year  = y_use,
+  month = m_use,
+  day   = d_use,
+  node  = bmu
+)
+
+write.csv(assign_df, file.path(outdir, "som_daily_assignment.csv"), row.names = FALSE)
+
+# ----------------------------
+# 11. recover node codebook maps
+#     note:
+#     codes are in standardized weighted-anomaly space
+#     convert back to weighted anomaly space first
+#     then divide by weight to recover anomaly in original units
+# ----------------------------
+template <- r_anom[[1]]
+used_cells <- which(keep_col)
+
+n_nodes <- xdim * ydim
+node_code_maps <- vector("list", n_nodes)
+
+for (k in seq_len(n_nodes)) {
+  
+  # codebook in scaled space
+  code_scaled <- som_model$codes[[1]][k, ]
+  
+  # back-transform to weighted anomaly space
+  code_weighted <- code_scaled * x_scale + x_center
+  
+  # full vector on template grid
+  v <- rep(NA_real_, ncell(template))
+  v[used_cells] <- code_weighted
+  
+  rr_weighted <- setValues(template, v)
+  
+  # divide by weight to recover anomaly unit
+  rr_anom <- rr_weighted / w_rast
+  
+  node_code_maps[[k]] <- rr_anom
+}
+
+# save node codebook maps
+node_code_stack <- rast(node_code_maps)
+names(node_code_stack) <- paste0("Node_", seq_len(n_nodes))
+writeRaster(
+  node_code_stack,
+  file.path(outdir, "som_node_codebook_anomaly_maps.nc"),
+  overwrite = TRUE
+)
+
+# plot node codebook maps
+rng_code <- max(abs(global(node_code_stack, "max", na.rm = TRUE)[,1]),
+                abs(global(node_code_stack, "min", na.rm = TRUE)[,1]),
+                na.rm = TRUE)
+
+png(file.path(outdir, "som_node_codebook_maps.png"), width = 1600, height = 1600, res = 160)
+par(mfrow = c(ydim, xdim), mar = c(3, 3, 3, 5))
+for (k in seq_len(n_nodes)) {
+  plot(node_code_maps[[k]],
+       main = paste("Node", k, "codebook anomaly"),
+       zlim = c(-rng_code, rng_code))
+}
+dev.off()
+
+# ----------------------------
+# 12. node composite maps
+#     composite of ORIGINAL anomaly field by node membership
+# ----------------------------
+node_comp_maps <- vector("list", n_nodes)
+node_counts <- integer(n_nodes)
+
+for (k in seq_len(n_nodes)) {
+  ii <- which(bmu == k)
+  node_counts[k] <- length(ii)
+  
+  if (length(ii) > 0) {
+    node_comp_maps[[k]] <- mean(r_anom[[keep_row]][[ii]], na.rm = TRUE)
+  } else {
+    node_comp_maps[[k]] <- template
+    values(node_comp_maps[[k]]) <- NA
+  }
+}
+
+node_comp_stack <- rast(node_comp_maps)
+names(node_comp_stack) <- paste0("Node_", seq_len(n_nodes))
+writeRaster(
+  node_comp_stack,
+  file.path(outdir, "som_node_composite_anomaly_maps.nc"),
+  overwrite = TRUE
+)
+
+# plot composite maps
+rng_comp <- max(abs(global(node_comp_stack, "max", na.rm = TRUE)[,1]),
+                abs(global(node_comp_stack, "min", na.rm = TRUE)[,1]),
+                na.rm = TRUE)
+
+png(file.path(outdir, "som_node_composite_maps.png"), width = 1600, height = 1600, res = 160)
+par(mfrow = c(ydim, xdim), mar = c(3, 3, 3, 5))
+for (k in seq_len(n_nodes)) {
+  plot(node_comp_maps[[k]],
+       main = paste0("Node ", k, " composite (n=", node_counts[k], ")"),
+       zlim = c(-rng_comp, rng_comp))
+}
+dev.off()
+
+# ----------------------------
+# 13. occurrence frequency by year
+#     frequency within each year's JJA samples
+# ----------------------------
+year_seq <- sort(unique(assign_df$year))
+
+freq_mat <- matrix(
+  0,
+  nrow = length(year_seq),
+  ncol = n_nodes,
+  dimnames = list(year_seq, paste0("Node_", seq_len(n_nodes)))
+)
+
+for (i in seq_along(year_seq)) {
+  yr <- year_seq[i]
+  sub <- assign_df[assign_df$year == yr, ]
+  tab <- table(factor(sub$node, levels = seq_len(n_nodes)))
+  freq_mat[i, ] <- as.numeric(tab) / sum(tab)
+}
+
+freq_df <- data.frame(
+  year = year_seq,
+  freq_mat,
+  check.names = FALSE
+)
+
+write.csv(freq_df, file.path(outdir, "som_occurrence_frequency_by_year.csv"), row.names = FALSE)
+
+# ----------------------------
+# 14. 10-year running mean
+#     trailing running mean
+# ----------------------------
+running_mean <- function(z, k = 10) {
+  as.numeric(stats::filter(z, rep(1 / k, k), sides = 1))
+}
+
+freq10_df <- data.frame(year = year_seq)
+
+for (k in seq_len(n_nodes)) {
+  nm <- paste0("Node_", k)
+  freq10_df[[nm]] <- running_mean(freq_df[[nm]], k = 10)
+}
+
+write.csv(freq10_df, file.path(outdir, "som_occurrence_frequency_10yr_running_mean.csv"),
+          row.names = FALSE)
+
+# ----------------------------
+# 15. plot annual occurrence frequency
+# ----------------------------
+png(file.path(outdir, "som_occurrence_frequency_timeseries.png"),
+    width = 1800, height = 1800, res = 170)
+
+par(mfrow = c(ydim, xdim), mar = c(4, 4, 3, 1))
+
+for (k in seq_len(n_nodes)) {
+  nm <- paste0("Node_", k)
+  
+  yr <- freq_df$year
+  y1 <- freq_df[[nm]]
+  y2 <- freq10_df[[nm]]
+  
+  plot(yr, y1,
+       type = "h",
+       lwd = 2,
+       ylim = c(0, max(freq_df[, -1], na.rm = TRUE)),
+       xlab = "Year",
+       ylab = "Occurrence frequency",
+       main = paste("Node", k))
+  lines(yr, y2, lwd = 3)
+}
+
+dev.off()
+
+# ----------------------------
+# 16. optional: node-wise mean occurrence over all years
+# ----------------------------
+node_mean_freq <- colMeans(freq_df[, -1], na.rm = TRUE)
+node_mean_freq_df <- data.frame(
+  node = seq_len(n_nodes),
+  mean_occurrence_frequency = node_mean_freq,
+  count = node_counts
+)
+write.csv(node_mean_freq_df,
+          file.path(outdir, "som_node_mean_occurrence_summary.csv"),
+          row.names = FALSE)
+
+# ----------------------------
+# 17. save model object
+# ----------------------------
+saveRDS(som_model, file.path(outdir, "som_model.rds"))
+
+cat("All outputs saved in:", outdir, "\n")
