@@ -72,11 +72,11 @@ get_script_dir <- function() {
 # 1. user settings
 # ----------------------------
 repo_root <- find_repo_root(get_script_dir())
-processed_dir <- file.path(repo_root, "data", "processed")
+processed_dir <- file.path(repo_root, "data")
 outdir <- file.path(repo_root, "outputs", "som_u850")
 
-infile <- file.path(processed_dir, "uwnd_z850_jja_1991_2023.nc")
-varname <- "uwnd"   # if needed for checking only
+infile <- file.path(processed_dir, "uwnd_z850_jja_1982_2025.nc")
+varname <- "uwnd" # if needed for checking only
 
 if (!dir.exists(outdir)) dir.create(outdir, recursive = TRUE)
 
@@ -85,8 +85,8 @@ set.seed(123)
 # SOM settings
 xdim <- 3
 ydim <- 3
-rlen <- 200
-alpha_vals <- c(0.05, 0.01)
+rlen <- 1000
+alpha_vals <- c(0.5, 0.01)
 
 # ----------------------------
 # 2. read data
@@ -104,14 +104,14 @@ r <- rast(infile)
 r <- crop(r, ext(100, 180, 0, 60))
 
 # ----------------------------
-# 4. select JJA 1991-2023
+# 4. select JJA 1982-2025
 # ----------------------------
 tt <- as.Date(time(r))
 yy <- as.integer(format(tt, "%Y"))
 mm <- as.integer(format(tt, "%m"))
 dd <- as.integer(format(tt, "%d"))
 
-idx <- which(yy >= 1991 & yy <= 2023 & mm %in% c(6, 7, 8))
+idx <- which(yy >= 1982 & yy <= 2025 & mm %in% c(6, 7, 8))
 
 r_jja <- r[[idx]]
 t_jja <- tt[idx]
@@ -190,7 +190,7 @@ x_scaled <- scale(x)
 
 # store scaling info
 x_center <- attr(x_scaled, "scaled:center")
-x_scale  <- attr(x_scaled, "scaled:scale")
+x_scale <- attr(x_scaled, "scaled:scale")
 
 # ----------------------------
 # 8. train SOM
@@ -251,22 +251,21 @@ n_nodes <- xdim * ydim
 node_code_maps <- vector("list", n_nodes)
 
 for (k in seq_len(n_nodes)) {
-  
   # codebook in scaled space
   code_scaled <- som_model$codes[[1]][k, ]
-  
+
   # back-transform to weighted anomaly space
   code_weighted <- code_scaled * x_scale + x_center
-  
+
   # full vector on template grid
   v <- rep(NA_real_, ncell(template))
   v[used_cells] <- code_weighted
-  
+
   rr_weighted <- setValues(template, v)
-  
+
   # divide by weight to recover anomaly unit
   rr_anom <- rr_weighted / w_rast
-  
+
   node_code_maps[[k]] <- rr_anom
 }
 
@@ -280,16 +279,18 @@ writeRaster(
 )
 
 # plot node codebook maps
-rng_code <- max(abs(global(node_code_stack, "max", na.rm = TRUE)[,1]),
-                abs(global(node_code_stack, "min", na.rm = TRUE)[,1]),
-                na.rm = TRUE)
+rng_code <- max(abs(global(node_code_stack, "max", na.rm = TRUE)[, 1]),
+  abs(global(node_code_stack, "min", na.rm = TRUE)[, 1]),
+  na.rm = TRUE
+)
 
 png(file.path(outdir, "som_node_codebook_maps.png"), width = 1600, height = 1600, res = 160)
 par(mfrow = c(ydim, xdim), mar = c(3, 3, 3, 5))
 for (k in seq_len(n_nodes)) {
   plot(node_code_maps[[k]],
-       main = paste("Node", k, "codebook anomaly"),
-       zlim = c(-rng_code, rng_code))
+    main = paste("Node", k, "codebook anomaly"),
+    zlim = c(-rng_code, rng_code)
+  )
 }
 dev.off()
 
@@ -303,7 +304,7 @@ node_counts <- integer(n_nodes)
 for (k in seq_len(n_nodes)) {
   ii <- which(bmu == k)
   node_counts[k] <- length(ii)
-  
+
   if (length(ii) > 0) {
     node_comp_maps[[k]] <- mean(r_anom[[keep_row]][[ii]], na.rm = TRUE)
   } else {
@@ -321,16 +322,18 @@ writeRaster(
 )
 
 # plot composite maps
-rng_comp <- max(abs(global(node_comp_stack, "max", na.rm = TRUE)[,1]),
-                abs(global(node_comp_stack, "min", na.rm = TRUE)[,1]),
-                na.rm = TRUE)
+rng_comp <- max(abs(global(node_comp_stack, "max", na.rm = TRUE)[, 1]),
+  abs(global(node_comp_stack, "min", na.rm = TRUE)[, 1]),
+  na.rm = TRUE
+)
 
 png(file.path(outdir, "som_node_composite_maps.png"), width = 1600, height = 1600, res = 160)
 par(mfrow = c(ydim, xdim), mar = c(3, 3, 3, 5))
 for (k in seq_len(n_nodes)) {
   plot(node_comp_maps[[k]],
-       main = paste0("Node ", k, " composite (n=", node_counts[k], ")"),
-       zlim = c(-rng_comp, rng_comp))
+    main = paste0("Node ", k, " composite (n=", node_counts[k], ")"),
+    zlim = c(-rng_comp, rng_comp)
+  )
 }
 dev.off()
 
@@ -378,30 +381,33 @@ for (k in seq_len(n_nodes)) {
 }
 
 write.csv(freq10_df, file.path(outdir, "som_occurrence_frequency_10yr_running_mean.csv"),
-          row.names = FALSE)
+  row.names = FALSE
+)
 
 # ----------------------------
 # 15. plot annual occurrence frequency
 # ----------------------------
 png(file.path(outdir, "som_occurrence_frequency_timeseries.png"),
-    width = 1800, height = 1800, res = 170)
+  width = 1800, height = 1800, res = 170
+)
 
 par(mfrow = c(ydim, xdim), mar = c(4, 4, 3, 1))
 
 for (k in seq_len(n_nodes)) {
   nm <- paste0("Node_", k)
-  
+
   yr <- freq_df$year
   y1 <- freq_df[[nm]]
   y2 <- freq10_df[[nm]]
-  
+
   plot(yr, y1,
-       type = "h",
-       lwd = 2,
-       ylim = c(0, max(freq_df[, -1], na.rm = TRUE)),
-       xlab = "Year",
-       ylab = "Occurrence frequency",
-       main = paste("Node", k))
+    type = "h",
+    lwd = 2,
+    ylim = c(0, max(freq_df[, -1], na.rm = TRUE)),
+    xlab = "Year",
+    ylab = "Occurrence frequency",
+    main = paste("Node", k)
+  )
   lines(yr, y2, lwd = 3)
 }
 
@@ -417,8 +423,9 @@ node_mean_freq_df <- data.frame(
   count = node_counts
 )
 write.csv(node_mean_freq_df,
-          file.path(outdir, "som_node_mean_occurrence_summary.csv"),
-          row.names = FALSE)
+  file.path(outdir, "som_node_mean_occurrence_summary.csv"),
+  row.names = FALSE
+)
 
 # ----------------------------
 # 17. save model object
