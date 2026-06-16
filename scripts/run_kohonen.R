@@ -6,9 +6,7 @@
 # Features:
 #   - JJA anomaly
 #   - area weighting
-#   - node composite maps
-#   - annual occurrence frequency
-#   - 10-year running mean
+#   - annual occurrence frequency CSV
 # =========================================================
 
 # ----------------------------
@@ -136,10 +134,6 @@ cat("Final SOM matrix dimension:", dim(x)[1], "samples x", dim(x)[2], "grid cell
 # standardize each variable (grid point)
 x_scaled <- scale(x)
 
-# store scaling info
-x_center <- attr(x_scaled, "scaled:center")
-x_scale <- attr(x_scaled, "scaled:scale")
-
 # ----------------------------
 # 8. train SOM
 # ----------------------------
@@ -186,107 +180,13 @@ assign_df <- data.frame(
 write.csv(assign_df, file.path(outdir, "som_daily_assignment.csv"), row.names = FALSE)
 
 # ----------------------------
-# 11. recover node codebook maps
-#     note:
-#     codes are in standardized weighted-anomaly space
-#     convert back to weighted anomaly space first
-#     then divide by weight to recover anomaly in original units
+# 11. node counts
 # ----------------------------
-template <- r_anom[[1]]
-used_cells <- which(keep_col)
-
 n_nodes <- xdim * ydim
-node_code_maps <- vector("list", n_nodes)
-
-for (k in seq_len(n_nodes)) {
-  # codebook in scaled space
-  code_scaled <- som_model$codes[[1]][k, ]
-
-  # back-transform to weighted anomaly space
-  code_weighted <- code_scaled * x_scale + x_center
-
-  # full vector on template grid
-  v <- rep(NA_real_, ncell(template))
-  v[used_cells] <- code_weighted
-
-  rr_weighted <- setValues(template, v)
-
-  # divide by weight to recover anomaly unit
-  rr_anom <- rr_weighted / w_rast
-
-  node_code_maps[[k]] <- rr_anom
-}
-
-# save node codebook maps
-node_code_stack <- rast(node_code_maps)
-names(node_code_stack) <- paste0("Node_", seq_len(n_nodes))
-writeRaster(
-  node_code_stack,
-  file.path(outdir, "som_node_codebook_anomaly_maps.nc"),
-  overwrite = TRUE
-)
-
-# plot node codebook maps
-rng_code <- max(abs(global(node_code_stack, "max", na.rm = TRUE)[, 1]),
-  abs(global(node_code_stack, "min", na.rm = TRUE)[, 1]),
-  na.rm = TRUE
-)
-
-png(file.path(outdir, "som_node_codebook_maps.png"), width = 1600, height = 1600, res = 160)
-par(mfrow = c(ydim, xdim), mar = c(3, 3, 3, 5))
-for (k in seq_len(n_nodes)) {
-  plot(node_code_maps[[k]],
-    main = paste("Node", k, "codebook anomaly"),
-    zlim = c(-rng_code, rng_code)
-  )
-}
-dev.off()
+node_counts <- as.integer(table(factor(bmu, levels = seq_len(n_nodes))))
 
 # ----------------------------
-# 12. node composite maps
-#     composite of ORIGINAL anomaly field by node membership
-# ----------------------------
-node_comp_maps <- vector("list", n_nodes)
-node_counts <- integer(n_nodes)
-
-for (k in seq_len(n_nodes)) {
-  ii <- which(bmu == k)
-  node_counts[k] <- length(ii)
-
-  if (length(ii) > 0) {
-    node_comp_maps[[k]] <- mean(r_anom[[keep_row]][[ii]], na.rm = TRUE)
-  } else {
-    node_comp_maps[[k]] <- template
-    values(node_comp_maps[[k]]) <- NA
-  }
-}
-
-node_comp_stack <- rast(node_comp_maps)
-names(node_comp_stack) <- paste0("Node_", seq_len(n_nodes))
-writeRaster(
-  node_comp_stack,
-  file.path(outdir, "som_node_composite_anomaly_maps.nc"),
-  overwrite = TRUE
-)
-
-# plot composite maps
-rng_comp <- max(abs(global(node_comp_stack, "max", na.rm = TRUE)[, 1]),
-  abs(global(node_comp_stack, "min", na.rm = TRUE)[, 1]),
-  na.rm = TRUE
-)
-
-png(file.path(outdir, "som_node_composite_maps.png"), width = 1600, height = 1600, res = 160)
-par(mfrow = c(ydim, xdim), mar = c(3, 3, 3, 5))
-for (k in seq_len(n_nodes)) {
-  plot(node_comp_maps[[k]],
-    main = paste0("Node ", k, " composite (n=", node_counts[k], ")"),
-    zlim = c(-rng_comp, rng_comp)
-  )
-}
-dev.off()
-
-# ----------------------------
-# 13. occurrence frequency by year
+# 12. occurrence frequency by year
 #     frequency within each year's JJA samples
 # ----------------------------
 year_seq <- sort(unique(assign_df$year))
@@ -313,56 +213,11 @@ freq_df <- data.frame(
 
 write.csv(freq_df, file.path(outdir, "som_occurrence_frequency_by_year.csv"), row.names = FALSE)
 
-# ----------------------------
-# 14. 10-year running mean
-#     trailing running mean
-# ----------------------------
-running_mean <- function(z, k = 10) {
-  as.numeric(stats::filter(z, rep(1 / k, k), sides = 1))
-}
-
-freq10_df <- data.frame(year = year_seq)
-
-for (k in seq_len(n_nodes)) {
-  nm <- paste0("Node_", k)
-  freq10_df[[nm]] <- running_mean(freq_df[[nm]], k = 10)
-}
-
-write.csv(freq10_df, file.path(outdir, "som_occurrence_frequency_10yr_running_mean.csv"),
-  row.names = FALSE
-)
+cat("Render occurrence timeseries with:\n")
+cat("  Rscript scripts/render_occurrence_timeseries.R\n")
 
 # ----------------------------
-# 15. plot annual occurrence frequency
-# ----------------------------
-png(file.path(outdir, "som_occurrence_frequency_timeseries.png"),
-  width = 1800, height = 1800, res = 170
-)
-
-par(mfrow = c(ydim, xdim), mar = c(4, 4, 3, 1))
-
-for (k in seq_len(n_nodes)) {
-  nm <- paste0("Node_", k)
-
-  yr <- freq_df$year
-  y1 <- freq_df[[nm]]
-  y2 <- freq10_df[[nm]]
-
-  plot(yr, y1,
-    type = "h",
-    lwd = 2,
-    ylim = c(0, max(freq_df[, -1], na.rm = TRUE)),
-    xlab = "Year",
-    ylab = "Occurrence frequency",
-    main = paste("Node", k)
-  )
-  lines(yr, y2, lwd = 3)
-}
-
-dev.off()
-
-# ----------------------------
-# 16. optional: node-wise mean occurrence over all years
+# 13. optional: node-wise mean occurrence over all years
 # ----------------------------
 node_mean_freq <- colMeans(freq_df[, -1], na.rm = TRUE)
 node_mean_freq_df <- data.frame(
@@ -376,7 +231,7 @@ write.csv(node_mean_freq_df,
 )
 
 # ----------------------------
-# 17. save model object
+# 14. save model object
 # ----------------------------
 saveRDS(som_model, file.path(outdir, "som_model.rds"))
 
