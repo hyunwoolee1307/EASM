@@ -16,3 +16,5 @@ outputs/
 .Rhistory
 renv.lock/
 renv/
+
+EASM.code-workspace
