@@ -18,3 +18,5 @@ renv.lock/
 renv/
 
 EASM.code-workspace
+
+.agents/
