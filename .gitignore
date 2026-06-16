@@ -11,3 +11,9 @@ Thumbs.db
 data/raw/
 data/processed/
 outputs/
+
+.Rprofile
+.RData
+.Rhistory
+renv.lock/
+renv/
