@@ -18,69 +18,17 @@ library(terra)
 library(kohonen)
 
 # ----------------------------
-# 0.5 path bootstrap
-# ----------------------------
-find_repo_root <- function(start) {
-  current <- normalizePath(start, winslash = "/", mustWork = TRUE)
-
-  repeat {
-    has_repo_shape <- dir.exists(file.path(current, "scripts")) &&
-      dir.exists(file.path(current, "notebooks")) &&
-      dir.exists(file.path(current, "data"))
-
-    if (has_repo_shape) {
-      return(current)
-    }
-
-    parent <- dirname(current)
-    if (identical(parent, current)) {
-      break
-    }
-    current <- parent
-  }
-
-  stop("Could not locate the repository root from the current execution context.")
-}
-
-get_script_dir <- function() {
-  args <- commandArgs(trailingOnly = FALSE)
-  file_arg <- "--file="
-  matches <- grep(file_arg, args, value = TRUE)
-
-  if (length(matches) > 0) {
-    script_path <- sub(file_arg, "", matches[1])
-    return(dirname(normalizePath(script_path, winslash = "/", mustWork = TRUE)))
-  }
-
-  frame_files <- vapply(sys.frames(), function(env) {
-    if (exists("ofile", envir = env, inherits = FALSE)) {
-      get("ofile", envir = env, inherits = FALSE)
-    } else {
-      NA_character_
-    }
-  }, character(1))
-
-  frame_files <- frame_files[!is.na(frame_files)]
-  if (length(frame_files) > 0) {
-    return(dirname(normalizePath(frame_files[1], winslash = "/", mustWork = TRUE)))
-  }
-
-  normalizePath(getwd(), winslash = "/", mustWork = TRUE)
-}
-
-# ----------------------------
 # 1. user settings
 # ----------------------------
-repo_root <- find_repo_root(get_script_dir())
+repo_root <- "/home/user/EASM"
 processed_dir <- file.path(repo_root, "data")
 outdir <- file.path(repo_root, "outputs", "som_u850")
-
 infile <- file.path(processed_dir, "uwnd_z850_jja_1982_2025.nc")
-varname <- "uwnd" # if needed for checking only
+varname <- "uwnd"
 
 if (!dir.exists(outdir)) dir.create(outdir, recursive = TRUE)
 
-set.seed(123)
+set.seed(42)  # the answer to life the universe and everything!
 
 # SOM settings
 xdim <- 3
@@ -99,9 +47,9 @@ r <- rast(infile)
 
 # ----------------------------
 # 3. crop domain
-#    domain: 100E-180E, 0-60N
+#    domain: 100E-180E, 10-60N
 # ----------------------------
-r <- crop(r, ext(100, 180, 0, 60))
+r <- crop(r, ext(100, 180, 10, 60))
 
 # ----------------------------
 # 4. select JJA 1982-2025
