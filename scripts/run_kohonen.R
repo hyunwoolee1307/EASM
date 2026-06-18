@@ -18,7 +18,7 @@ library(kohonen)
 # ----------------------------
 # 1. user settings
 # ----------------------------
-repo_root <- "/home/user/EASM"
+repo_root <- "C:/Users/user/EASM"
 processed_dir <- file.path(repo_root, "data")
 outdir <- file.path(repo_root, "outputs", "som_u850")
 infile <- file.path(processed_dir, "uwnd_z850_jja_1982_2025.nc")
